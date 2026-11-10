@@ -13,9 +13,14 @@
 #        HTTPS/CDN, XMPP 5222, game 26000, image 26001,
 #        gateway 26002/26003, and Redshift 26400.
 #   6. Initialize the selected Steam Proton prefix if needed.
-#   7. Launch EVE only after all backend/TLS checks pass.
+#   7. The EVE client is never started automatically. Menu option [3] starts/stops the
+#      primary EVE client, which is only allowed once all backend/TLS checks pass.
 #   8. Menu option [N] launches any number of additional EVE clients against
 #      the same running backend, each with its own PID file and log.
+#
+# Menu restarts ([R], [M], [A]) always restart the Market/game servers and restart the
+# primary EVE client only when it was already running before the restart. Additional
+# clients started by [N] are closed by a restart and are not reopened.
 #
 # Audited runtime policy:
 #   * Stock EveJS releases installed or updated by this Setup are supported (an audited
@@ -1277,24 +1282,39 @@ start_all() {
     repair_client_ca_bundles || return 1
     launch_market_server || return 1
     launch_game_server || return 1
-    launch_client || return 1
 }
 
+# Restarts the game server (and its Market dependency where the caller needs it) and brings
+# the primary EVE client back only when it was running before the restart.
 restart_game_and_client() {
+    local client_was_running=0
+    is_pid_running "$CLIENT_PID" && client_was_running=1
     stop_extra_clients
     stop_pid "$CLIENT_PID" "EVE client" 10; CLIENT_PID=""
     stop_pid "$SERVER_PID" "game server" 30; SERVER_PID=""
     sleep 1
-    reconcile_required_ports "$MARKET_PID" && ensure_loopback_cdn_permission && launch_game_server && launch_client
+    reconcile_required_ports "$MARKET_PID" && ensure_loopback_cdn_permission && launch_game_server || return 1
+    if (( client_was_running )); then
+        launch_client || return 1
+    else
+        echo "Primary EVE client was not running; it stays stopped. Use [3] to start it."
+    fi
 }
 
 restart_all() {
+    local client_was_running=0
+    is_pid_running "$CLIENT_PID" && client_was_running=1
     stop_extra_clients
     stop_pid "$CLIENT_PID" "EVE client" 10; CLIENT_PID=""
     stop_pid "$SERVER_PID" "game server" 30; SERVER_PID=""
     stop_pid "$MARKET_PID" "market server" 10; MARKET_PID=""
     sleep 1
-    start_all
+    start_all || return 1
+    if (( client_was_running )); then
+        launch_client || return 1
+    else
+        echo "Primary EVE client was not running; it stays stopped. Use [3] to start it."
+    fi
 }
 
 echo
@@ -1324,6 +1344,8 @@ fi
 if ! start_all; then
     echo
     echo "[STARTUP STOPPED] One required stage failed. Inspect the service windows/logs."
+else
+    echo "  [CLIENT]  not started automatically; use [3] to start the EVE client"
 fi
 
 while true; do
@@ -1367,9 +1389,9 @@ while true; do
     echo "[3] Start/stop EVE client"
     echo "[N] Launch another EVE client (no limit)"
     echo "[X] Close all additional EVE clients"
-    echo "[R] Restart Game + client"
-    echo "[M] Reload mods (restart Game + client)"
-    echo "[A] Full ordered reload (Market → Game → Client)"
+    echo "[R] Restart Game (client only if it was running)"
+    echo "[M] Reload mods (restart Game; client only if it was running)"
+    echo "[A] Full ordered reload (Market → Game; client only if it was running)"
     echo "[S] Show mods"
     echo "[D] Diagnose required ports"
     echo "[P] Show paths"
